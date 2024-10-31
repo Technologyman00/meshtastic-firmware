@@ -7,6 +7,7 @@
 #include "PowerMon.h"
 #include "RTC.h"
 #include "Throttle.h"
+#include "buzz.h"
 #include "meshUtils.h"
 #include "buzz.h"
 
@@ -20,6 +21,7 @@
 #ifdef ARCH_PORTDUINO
 #include "PortduinoGlue.h"
 #include "meshUtils.h"
+#include <algorithm>
 #include <ctime>
 #endif
 
@@ -267,6 +269,9 @@ GPS_RESPONSE GPS::getACK(uint8_t class_id, uint8_t msg_id, uint32_t waitMillis)
     uint32_t startTime = millis();
     const char frame_errors[] = "More than 100 frame errors";
     int sCounter = 0;
+#ifdef GPS_DEBUG
+    std::string debugmsg = "";
+#endif
 
     for (int j = 2; j < 6; j++) {
         buf[8] += buf[j];
@@ -292,20 +297,24 @@ GPS_RESPONSE GPS::getACK(uint8_t class_id, uint8_t msg_id, uint32_t waitMillis)
             if (b == frame_errors[sCounter]) {
                 sCounter++;
                 if (sCounter == 26) {
+#ifdef GPS_DEBUG
+
+                    LOG_DEBUG(debugmsg.c_str());
+#endif
                     return GNSS_RESPONSE_FRAME_ERRORS;
                 }
             } else {
                 sCounter = 0;
             }
 #ifdef GPS_DEBUG
-            LOG_DEBUG("%02X", b);
+            debugmsg += vformat("%02X", b);
 #endif
             if (b == buf[ack]) {
                 ack++;
             } else {
                 if (ack == 3 && b == 0x00) { // UBX-ACK-NAK message
 #ifdef GPS_DEBUG
-                    LOG_DEBUG("");
+                    LOG_DEBUG(debugmsg.c_str());
 #endif
                     LOG_WARN("Got NAK for class %02X message %02X", class_id, msg_id);
                     return GNSS_RESPONSE_NAK; // NAK received
@@ -315,7 +324,7 @@ GPS_RESPONSE GPS::getACK(uint8_t class_id, uint8_t msg_id, uint32_t waitMillis)
         }
     }
 #ifdef GPS_DEBUG
-    LOG_DEBUG("");
+    LOG_DEBUG(debugmsg.c_str());
     LOG_WARN("No response for class %02X message %02X", class_id, msg_id);
 #endif
     return GNSS_RESPONSE_NONE; // No response received within timeout
@@ -467,6 +476,18 @@ bool GPS::setup()
             delay(250);
             // Switch to Fitness Mode, for running and walking purpose with low speed (<5 m/s)
             _serial_gps->write("$PMTK886,1*29\r\n");
+            delay(250);
+        } else if (gnssModel == GNSS_MODEL_MTK_PA1616S) {
+            // PA1616S is used in some GPS breakout boards from Adafruit
+            // PA1616S does not have GLONASS capability. PA1616D does, but is not implemented here.
+            _serial_gps->write("$PMTK353,1,0,0,0,0*2A\r\n");
+            // Above command will reset the GPS and takes longer before it will accept new commands
+            delay(1000);
+            // Only ask for RMC and GGA (GNRMC and GNGGA)
+            _serial_gps->write("$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n");
+            delay(250);
+            // Enable SBAS / WAAS
+            _serial_gps->write("$PMTK301,2*2E\r\n");
             delay(250);
         } else if (gnssModel == GNSS_MODEL_ATGM336H) {
             // Set the intial configuration of the device - these _should_ work for most AT6558 devices
@@ -1136,6 +1157,7 @@ GnssModel_t GPS::probe(int serialSpeed)
     delay(20);
 
     PROBE_SIMPLE("L76B", "$PMTK605*31", "Quectel-L76B", GNSS_MODEL_MTK_L76B, 500);
+    PROBE_SIMPLE("PA1616S", "$PMTK605*31", "1616S", GNSS_MODEL_MTK_PA1616S, 500);
 
     uint8_t cfg_rate[] = {0xB5, 0x62, 0x06, 0x08, 0x00, 0x00, 0x00, 0x00};
     UBXChecksum(cfg_rate, sizeof(cfg_rate));
@@ -1624,6 +1646,9 @@ bool GPS::whileActive()
 {
     unsigned int charsInBuf = 0;
     bool isValid = false;
+#ifdef GPS_DEBUG
+    std::string debugmsg = "";
+#endif
     if (powerState != GPS_ACTIVE) {
         clearBuffer();
         return false;
@@ -1641,7 +1666,7 @@ bool GPS::whileActive()
         int c = _serial_gps->read();
         UBXscratch[charsInBuf] = c;
 #ifdef GPS_DEBUG
-        LOG_DEBUG("%c", c);
+        debugmsg += vformat("%c", (c >= 32 && c <= 126) ? c : '.');
 #endif
         isValid |= reader.encode(c);
         if (charsInBuf > sizeof(UBXscratch) - 10 || c == '\r') {
@@ -1653,6 +1678,9 @@ bool GPS::whileActive()
             charsInBuf++;
         }
     }
+#ifdef GPS_DEBUG
+    LOG_DEBUG(debugmsg.c_str());
+#endif
     return isValid;
 }
 void GPS::enable()
